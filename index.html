@@ -299,14 +299,18 @@
 
 <script>
 const CAT_COLORS = {
-  'Dining':        { fill: '#FFE8DF', text: '#C8440A', bar: '#C8440A' },
-  'Airfare':       { fill: '#ECEAFC', text: '#5B47C8', bar: '#5B47C8' },
-  'Merchandise':   { fill: '#DDF0FF', text: '#1A6FAD', bar: '#1A6FAD' },
-  'Gas/Automotive':{ fill: '#D8F5EC', text: '#0F7856', bar: '#0F7856' },
-  'Entertainment': { fill: '#FCE4F3', text: '#B5327A', bar: '#B5327A' },
-  'Payment/Credit':{ fill: '#D9F5EA', text: '#2D8A60', bar: '#2D8A60' },
-  'Other Services':{ fill: '#F0EDEA', text: '#7A766E', bar: '#7A766E' },
-  'Other':         { fill: '#F0EDEA', text: '#7A766E', bar: '#7A766E' },
+  'Dining':               { fill: '#FFE8DF', text: '#C8440A', bar: '#C8440A' },
+  'Fast Food':            { fill: '#FFE8DF', text: '#C8440A', bar: '#C8440A' },
+  'Airfare':              { fill: '#ECEAFC', text: '#5B47C8', bar: '#5B47C8' },
+  'Merchandise':          { fill: '#DDF0FF', text: '#1A6FAD', bar: '#1A6FAD' },
+  'Gas/Automotive':       { fill: '#D8F5EC', text: '#0F7856', bar: '#0F7856' },
+  'Parking':              { fill: '#D8F5EC', text: '#0F7856', bar: '#0F7856' },
+  'Public Transportation':{ fill: '#E8F4FF', text: '#1A6FAD', bar: '#1A6FAD' },
+  'Entertainment':        { fill: '#FCE4F3', text: '#B5327A', bar: '#B5327A' },
+  'Payment/Credit':       { fill: '#D9F5EA', text: '#2D8A60', bar: '#2D8A60' },
+  'Transfer':             { fill: '#D9F5EA', text: '#2D8A60', bar: '#2D8A60' },
+  'Other Services':       { fill: '#F0EDEA', text: '#7A766E', bar: '#7A766E' },
+  'Other':                { fill: '#F0EDEA', text: '#7A766E', bar: '#7A766E' },
 };
 
 function catColor(cat) {
@@ -371,12 +375,21 @@ function processFile(file) {
 function detectCols(row) {
   const keys = Object.keys(row);
   const find = (...terms) => keys.find(k => terms.some(t => k.toLowerCase().includes(t.toLowerCase())));
+
+  const debitCol  = find('Debit', 'Charge', 'Withdrawal');
+  const creditCol = find('Credit', 'Payment', 'Deposit');
+  const amountCol = find('Amount');
+
+  // Huntington uses a single signed Amount column; Capital One uses separate Debit/Credit
+  const isSingleAmount = !debitCol && !creditCol && !!amountCol;
+
   return {
-    date:   find('Transaction Date', 'Date', 'trans'),
-    desc:   find('Description', 'Merchant', 'Name', 'Memo'),
-    cat:    find('Category', 'Type', 'Tag'),
-    debit:  find('Debit', 'Amount', 'Charge', 'Withdrawal'),
-    credit: find('Credit', 'Payment', 'Deposit'),
+    date:           find('Transaction Date', 'Date', 'trans'),
+    desc:           find('Description', 'Merchant', 'Name', 'Memo'),
+    cat:            find('Category', 'Type', 'Tag'),
+    debit:          isSingleAmount ? null : (debitCol || amountCol),
+    credit:         isSingleAmount ? null : creditCol,
+    amount:         isSingleAmount ? amountCol : null,
   };
 }
 
@@ -402,13 +415,33 @@ function renderDashboard(rows) {
   const cols = detectCols(rows[0]);
   if (!cols.date || !cols.desc) { showError('Could not detect required columns (Date, Description). Check file format.'); return; }
 
-  const txns = rows.map(r => ({
-    date:   parseDate(r[cols.date]),
-    desc:   String(r[cols.desc] || '').trim(),
-    cat:    String(r[cols.cat] || 'Other').trim() || 'Other',
-    debit:  parseAmt(r[cols.debit]),
-    credit: parseAmt(r[cols.credit]),
-  })).filter(t => t.desc);
+  const txns = rows.map(r => {
+    let debit = null, credit = null;
+
+    if (cols.amount) {
+      // Huntington: negative = expense, positive = income/transfer in
+      const amt = parseAmt(r[cols.amount]);
+      if (amt !== null) {
+        if (amt < 0) debit = Math.abs(amt);
+        else credit = amt;
+      }
+    } else {
+      debit  = parseAmt(r[cols.debit]);
+      credit = parseAmt(r[cols.credit]);
+    }
+
+    // Strip "PURCHASE " prefix common in Huntington exports
+    const rawDesc = String(r[cols.desc] || '').trim();
+    const desc = rawDesc.replace(/^PURCHASE\s+/i, '');
+
+    return {
+      date:   parseDate(r[cols.date]),
+      desc,
+      cat:    String(r[cols.cat] || 'Other').trim() || 'Other',
+      debit,
+      credit,
+    };
+  }).filter(t => t.desc);
 
   // Month label
   const dates = txns.map(t => t.date).filter(Boolean);
@@ -518,8 +551,9 @@ function renderDashboard(rows) {
     }
   });
 
-  // Filter pills
-  const allCats = ['All', ...sortedCats.map(([c]) => c), 'Payment/Credit'];
+  // Filter pills — include all categories present in data + common credit categories
+  const creditCats = txns.map(t => t.credit !== null && t.debit === null ? t.cat : null).filter(Boolean);
+  const allCats = ['All', ...sortedCats.map(([c]) => c), ...creditCats];
   const uniqueCats = [...new Set(allCats)];
   let activeCat = 'All';
   const pillsEl = document.getElementById('filter-pills');
